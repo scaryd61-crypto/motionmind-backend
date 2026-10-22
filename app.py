@@ -132,6 +132,95 @@ def prediction(prediction_id):
         }), 502
 
 
+AI_PROMPTS = {
+    "thumbnail": (
+        "You help YouTube creators. Give 5 short thumbnail headline options "
+        "(max 40 characters each), one sub-text line for each, and 2 colour "
+        "pairs with a short reason. Plain text only, numbered list."
+    ),
+    "analyze": (
+        "You review a YouTube title, description and opening words. Give: "
+        "1) hook strength, 2) title clarity, 3) keyword use, 4) three specific "
+        "improvements. Be honest and short. Plain text only."
+    ),
+    "ideas": (
+        "You help YouTube creators. Give 5 video ideas for the topic, each with "
+        "a title, a one-line hook, difficulty (Easy, Medium or Hard) and one "
+        "production tip. Plain text only."
+    ),
+}
+
+
+@app.route("/ai", methods=["POST"])
+def ai():
+    api_key = os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        return jsonify({
+            "success": False,
+            "error": "AI is not configured on the server."
+        }), 500
+
+    data = request.get_json(silent=True) or {}
+    task = data.get("task", "")
+    text = data.get("text", "")
+
+    if task not in AI_PROMPTS:
+        return jsonify({
+            "success": False,
+            "error": "Unknown task."
+        }), 400
+
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({
+            "success": False,
+            "error": "Please type some text first."
+        }), 400
+
+    if len(text) > 4000:
+        return jsonify({
+            "success": False,
+            "error": "Text is too long (max 4000 characters)."
+        }), 400
+
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{
+                    "parts": [{
+                        "text": AI_PROMPTS[task] + "\n\nUser input:\n" + text.strip()
+                    }]
+                }]
+            },
+            timeout=30
+        )
+
+        if not response.ok:
+            return jsonify({
+                "success": False,
+                "error": "The AI service could not answer right now. Try again later."
+            }), 502
+
+        result = response.json()
+        reply = result["candidates"][0]["content"]["parts"][0]["text"]
+
+        return jsonify({
+            "success": True,
+            "text": reply
+        })
+
+    except (requests.RequestException, KeyError, IndexError, ValueError):
+        return jsonify({
+            "success": False,
+            "error": "The AI service could not answer right now. Try again later."
+        }), 502
+
+
 if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
