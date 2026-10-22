@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -15,6 +16,9 @@ CORS(app, origins=[origin.strip() for origin in allowed_origins])
 REPLICATE_API_URL = "https://api.replicate.com/v1"
 MODEL_OWNER = "minimax"
 MODEL_NAME = "video-01"
+
+IMAGE_MODEL_DEFAULT = "gemini-3.1-flash-lite-image"
+_image_usage = {"day": None, "count": 0}
 
 
 @app.route("/", methods=["GET"])
@@ -218,6 +222,99 @@ def ai():
         return jsonify({
             "success": False,
             "error": "The AI service could not answer right now. Try again later."
+        }), 502
+
+
+@app.route("/image", methods=["POST"])
+def image():
+    api_key = os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        return jsonify({
+            "success": False,
+            "error": "AI picture is not configured on the server."
+        }), 500
+
+    try:
+        daily_limit = int(os.environ.get("IMAGE_DAILY_LIMIT", "20"))
+    except ValueError:
+        daily_limit = 20
+
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if _image_usage["day"] != today:
+        _image_usage["day"] = today
+        _image_usage["count"] = 0
+
+    if _image_usage["count"] >= daily_limit:
+        return jsonify({
+            "success": False,
+            "error": "Today's AI picture limit is reached. Try again tomorrow."
+        }), 429
+
+    data = request.get_json(silent=True) or {}
+    prompt = data.get("prompt", "")
+
+    if not isinstance(prompt, str) or not prompt.strip():
+        return jsonify({
+            "success": False,
+            "error": "Please describe the picture first."
+        }), 400
+
+    if len(prompt) > 1000:
+        return jsonify({
+            "success": False,
+            "error": "Picture description is too long (max 1000 characters)."
+        }), 400
+
+    model = os.environ.get("GEMINI_IMAGE_MODEL", IMAGE_MODEL_DEFAULT)
+    full_prompt = (
+        "Create a 16:9 landscape background picture for a YouTube thumbnail. "
+        "Bold, simple composition, high contrast, no text, no letters, no logos, "
+        "no watermark. Subject: " + prompt.strip()
+    )
+
+    # Count before calling, so repeated failed tries cannot run up the bill.
+    _image_usage["count"] += 1
+
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [{"parts": [{"text": full_prompt}]}],
+                "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]}
+            },
+            timeout=90
+        )
+
+        if not response.ok:
+            return jsonify({
+                "success": False,
+                "error": "The AI picture service could not make the picture. Try again later."
+            }), 502
+
+        result = response.json()
+        parts = result["candidates"][0]["content"]["parts"]
+
+        for part in parts:
+            inline = part.get("inlineData") or part.get("inline_data")
+            if inline and inline.get("data"):
+                return jsonify({
+                    "success": True,
+                    "mimeType": inline.get("mimeType") or inline.get("mime_type") or "image/png",
+                    "data": inline["data"]
+                })
+
+        return jsonify({
+            "success": False,
+            "error": "No picture came back. Try a different description."
+        }), 502
+
+    except (requests.RequestException, KeyError, IndexError, ValueError, TypeError):
+        return jsonify({
+            "success": False,
+            "error": "The AI picture service could not make the picture. Try again later."
         }), 502
 
 
